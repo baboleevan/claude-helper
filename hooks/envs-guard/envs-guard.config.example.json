@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "/Users/me/github/my-app": {
+      "protect": ["secrets/", "config/credentials.json"],
+      "backupDir": "~/.my-app-env-backup"
+    }
+  }
+}

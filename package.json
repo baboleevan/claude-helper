@@ -1,0 +1,12 @@
+{
+  "name": "claude-helper",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code 훅·스킬·mod 모음과 설치 스크립트",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test hooks/*/*.test.mjs install.test.mjs"
+  }
+}
