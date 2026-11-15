@@ -21,7 +21,7 @@ node install.mjs                 # 모든 훅 설치
   node install.mjs --settings ~/.claude/settings.json \
     --settings "$HOME/Library/Application Support/orca/claude-profiles/<프로필 ID>/home/settings.json"
   ```
-- 일부만 설치: `node install.mjs --only envs-guard`
+- 일부만 설치: `node install.mjs --only envs-guard` (훅에 딸린 슬래시 명령은 각 설정 파일 옆 `commands/`에 복사)
 - 등록 해제: `node install.mjs --uninstall` (복사한 파일은 남김)
 - 설정을 고치기 전에 `settings.json.bak-<시각>-claude-helper` 백업을 남깁니다. 다른 훅은 건드리지 않고, 같은 훅을 다시 설치하면 교체만 합니다.
 - 실행 중인 세션에는 `/hooks`를 한 번 열거나 Claude Code를 다시 시작하면 반영됩니다.
@@ -52,6 +52,20 @@ node install.mjs                 # 모든 훅 설치
 ```json
 { "protect": ["secrets/", "config/credentials.json"], "backupDir": "~/.my-app-env-backup" }
 ```
+
+### ask-only — 질문엔 답변만 (`UserPromptSubmit`·`PreToolUse`, `/ask` 명령)
+
+`/ask <질문>`으로 묻거나 의문형으로 프롬프트를 쓰면 코드를 고치지 않고 답변만 하게 합니다.
+
+- **판정**: `/ask`로 시작하거나, 물음표로 끝나거나, "뭐야·어때·왜·~까·~나요·~지" 같은 의문 어미로 끝나면 질문입니다. "고쳐줄래?"처럼 고쳐·추가해·바꿔·배포해·해줘 같은 요청 동사가 들어 있으면 작업 요청으로 봅니다(`/ask`는 항상 답변만).
+- **질문일 때**: 모델 문맥에 "답변만 하라"는 안내를 넣고, 다음 프롬프트까지 이 세션에서 아래를 막습니다.
+  - Edit·Write·MultiEdit·NotebookEdit
+  - 상태를 바꾸는 Bash 명령: 파일로 리다이렉트, `rm`·`mv`·`cp`·`tee`, `sed -i`, git 커밋·푸시·브랜치 전환, `gh pr create/merge`, 설치, 배포 스크립트, `docker up/down`, 쓰기 SQL 등
+- **허용**: Read·Grep·Glob과 `cat`·`grep`·`ls`·`git status/diff/log`·`gh pr view` 같은 읽기 명령
+- **Bash 판정 방식**: 따옴표 안 문자열은 빼고(검색어에 "install"이 있어도 설치로 보지 않음), 명령을 `;` `&&` `||` `|`로 나눠 각 명령의 실행 파일과 하위 명령으로 판단합니다. `bash -c "…"`는 안의 명령을 다시 봅니다.
+- **`/ask` 명령**: 설치할 때 각 설정 파일 옆의 `commands/ask.md`로 복사됩니다.
+- **상태 파일**: `~/.claude/hooks/state/ask-only-<세션 ID>`(환경변수 `ASK_ONLY_STATE_DIR`로 변경 가능). 작업 프롬프트가 오면 지워집니다.
+- **한계**: 규칙 기반이라 애매한 문장은 틀릴 수 있습니다(예: "문제가 있어요" 같은 평서문). 파일로 저장한 스크립트 안이나 `node -e`·`python -c` 안의 쓰기는 보지 못하고, 그 경우에는 문맥 안내만 적용됩니다.
 
 ### korean-reply-guard — 한국어 답변 강제 (`UserPromptSubmit`·`Stop`)
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
  * claude-helper 설치 스크립트: 훅 파일을 복사하고 Claude Code 설정(settings.json)에 등록합니다.
+ * 훅에 딸린 슬래시 명령(예: /ask)은 각 설정 파일 옆의 `commands/` 폴더에 복사합니다.
  *
  * 사용법
  *   node install.mjs                         # 모든 훅 설치(기본 설정 파일)
@@ -35,6 +36,16 @@ export const HOOKS = {
         timeout: 10,
         statusMessage: ".env 원본 보호 확인",
       },
+    ],
+  },
+  "ask-only": {
+    description: "질문엔 답변만: /ask 또는 의문형 프롬프트면 파일 수정·상태 변경 도구를 막고 답변만 하게 함",
+    files: ["ask-only.mjs"],
+    entry: "ask-only.mjs",
+    commands: ["ask.md"],
+    events: [
+      { event: "UserPromptSubmit", timeout: 10 },
+      { event: "PreToolUse", matcher: "Write|Edit|MultiEdit|NotebookEdit|Bash", timeout: 10 },
     ],
   },
   "korean-reply-guard": {
@@ -152,6 +163,20 @@ function main() {
   }
 
   for (const file of opts.settings) {
+    if (!opts.uninstall) {
+      // 슬래시 명령은 설정 파일과 같은 폴더의 commands/에 둡니다(Claude Code가 읽는 사용자 명령 위치).
+      const commandDir = path.join(path.dirname(file), "commands");
+      for (const name of names) {
+        for (const command of HOOKS[name].commands ?? []) {
+          const dest = path.join(commandDir, command);
+          console.log(`${opts.dryRun ? "[미리보기] " : ""}명령 복사: hooks/${name}/${command} → ${dest}`);
+          if (!opts.dryRun) {
+            fs.mkdirSync(commandDir, { recursive: true });
+            fs.copyFileSync(path.join(ROOT, "hooks", name, command), dest);
+          }
+        }
+      }
+    }
     const exists = fs.existsSync(file);
     const current = exists ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
     const { settings, changes } = applyHooks(current, names, { hookDir, uninstall: opts.uninstall });
