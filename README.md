@@ -73,10 +73,40 @@ node install.mjs                 # 모든 훅 설치
 - 답변이 끝날 때 마지막 답변 본문(코드·경로·식별자 제외)의 한국어 단어 비율이 30% 미만이고 외국어 단어가 8개 이상이면, 끝내지 못하게 하고 한국어로 다시 쓰게 합니다(다시 쓰는 중에는 또 막지 않음).
 - 한계: Claude Code 훅은 답변이 화면에 표시되기 전에 막을 수 없습니다. 도구 호출 사이의 짧은 진행 안내는 `Stop`이 보지 못해 알림만 적용됩니다.
 
+## mod
+
+mod는 Claude Code 화면·동작을 바꾸는 플러그인입니다. 이 저장소가 marketplace(`.claude-plugin/marketplace.json`)라서 플러그인 명령으로 설치합니다.
+
+```bash
+# 다른 PC: GitHub에서 설치
+claude plugin marketplace add baboleevan/claude-helper
+claude plugin install changed-files@claude-helper
+
+# 이 저장소를 고치는 PC: 클론한 폴더를 marketplace로 등록하면 폴더를 바로 읽습니다
+claude plugin marketplace add ~/github/claude-helper
+claude plugin install changed-files@claude-helper
+```
+
+- 설정 폴더가 여러 개면(Orca 프로필마다) `CLAUDE_CONFIG_DIR=<프로필 폴더> claude plugin install ...`처럼 폴더마다 설치합니다.
+- 실행 중인 세션에는 `/reload-plugins`로 반영합니다.
+- 업데이트
+  - GitHub에서 설치한 PC: `claude plugin update changed-files@claude-helper` 뒤 `/reload-plugins`
+  - 클론 폴더를 marketplace로 등록한 PC: 파일을 고치고 `/reload-plugins`
+- 끄기: `claude plugin disable changed-files@claude-helper`
+
+### changed-files — 수정한 파일 패널
+
+- 오른쪽 패널(fullscreen 화면) 맨 위에 지금 작업 중인 워크트리와 브랜치를 보여 줍니다. 세션 폴더가 아니라 마지막으로 수정한 파일이 속한 작업 트리를 기준으로 합니다.
+- 그 아래에 이 세션에서 수정한 파일을 작업 트리별로 보여 줍니다(`A` 새 파일·`M` 수정·`D` 삭제, 더한 줄·지운 줄, 횟수, `Bash`·`에이전트` 꼬리표). 행을 누르면 워크스페이스 기준 경로를 복사합니다.
+- 찾는 방법: Edit·Write·NotebookEdit 도구 호출, Bash 명령 앞뒤 `git status` 비교, 불러올 때 대화 기록.
+- 패널이 안 보이면 `/changed-files`로 엽니다. 닫기는 패널의 닫기 표시나 `ctrl+x x`.
+- 한계: Bash 변경은 원래 수정돼 있던 파일을 다시 고치면 잡지 못합니다. 대화를 압축했으면 압축 전 기록은 다시 채우지 못할 수 있습니다. Bash 호출마다 `git status`가 앞뒤로 돕니다.
+
 ## 테스트
 
 ```bash
-npm test
+npm test            # 훅
+npm run test:mods   # mod (claude CLI 필요)
 ```
 
 테스트는 임시 폴더만 씁니다(실제 환경 파일·설정 파일을 건드리지 않음).
@@ -84,4 +114,5 @@ npm test
 ## 새 항목 추가
 
 - 훅: `hooks/<이름>/<이름>.mjs`와 테스트를 두고, `install.mjs`의 `HOOKS`에 한 줄을 추가합니다.
-- 스킬·mod: `skills/`, `mods/` 폴더를 만들어 같은 방식으로 추가합니다(설치 스크립트 확장 필요).
+- mod: `mods/<이름>/`(`.claude-plugin/plugin.json`, `hooks/`, `types/`, `tests/`)를 두고 `.claude-plugin/marketplace.json`의 `plugins`에 한 줄을 추가합니다. 고칠 때마다 `plugin.json`의 `version`을 올립니다.
+- 스킬: `skills/` 폴더를 만들어 같은 방식으로 추가합니다(설치 스크립트 확장 필요).

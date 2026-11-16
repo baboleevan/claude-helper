@@ -7,6 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test hooks/*/*.test.mjs install.test.mjs"
+    "test": "node --test hooks/*/*.test.mjs install.test.mjs",
+    "test:mods": "claude plugin validate . && claude plugin test mods/changed-files"
   }
 }

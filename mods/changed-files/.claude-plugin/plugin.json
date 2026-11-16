@@ -1,0 +1,6 @@
+{
+  "name": "changed-files",
+  "version": "0.1.0",
+  "description": "오른쪽 패널에 지금 작업 중인 워크트리·브랜치와 이 세션에서 수정한 파일 목록을 실시간으로 보여 준다",
+  "types": "./types/index.d.ts"
+}
