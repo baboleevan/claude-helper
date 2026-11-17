@@ -319,8 +319,10 @@ async function choose($: EngineInterface, id: string, choice: string): Promise<v
 }
 
 /** mod 도구가 Claude에게 돌려주는 글 결과 */
-function textResult(text: string, isError = false) {
-  return { result: { content: [{ type: 'text' as const, text }], isError } }
+// 실제 엔진은 mod 도구 결과로 글(또는 배열)만 받는다. { content, isError } 객체를 돌려주면 "output shape" 오류로 거부된다
+// (테스트 도구는 받아 주므로 실제 세션에서 확인했다). 잘못된 입력은 deny로 돌려 Claude가 오류로 읽게 한다.
+function textResult(text: string, isError = false): { result: string } | { deny: string } {
+  return isError ? { deny: text } : { result: text }
 }
 
 /** 도구 인자를 글자 키로 읽는다(도구 이름 옆에 펼쳐져 온다) */

@@ -79,11 +79,12 @@ function standIn(on: On, world: World) {
 }
 
 /** mod 도구를 부르고 결과 글을 돌려준다 */
+// 실제 엔진처럼 결과는 글이어야 한다. 글이 아니면(예: { content } 객체) 실패시켜 같은 실수를 다시 막는다.
 async function callTool($: { tool: { call: (input: never) => Promise<unknown> } }, name: string, args: Record<string, unknown>) {
-  const ran = (await $.tool.call({ tool: `mcp__decisions__${name}`, ...args } as never)) as {
-    result?: { content?: { text?: string }[] }
-  }
-  return ran.result?.content?.[0]?.text ?? ''
+  const ran = (await $.tool.call({ tool: `mcp__decisions__${name}`, ...args } as never)) as { result?: unknown; deny?: string }
+  if (ran.deny !== undefined) return `거부: ${ran.deny}`
+  if (typeof ran.result !== 'string') throw new Error(`도구 결과가 글이 아닙니다: ${JSON.stringify(ran.result)}`)
+  return ran.result
 }
 
 const OPTIONS = [
