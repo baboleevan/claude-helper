@@ -1,0 +1,6 @@
+{
+  "name": "decisions",
+  "version": "0.1.0",
+  "description": "오른쪽 패널에 사용자가 정해야 할 것과 이미 정한 것을 보여 주고, 패널에서 바로 골라 Claude에게 전달한다",
+  "types": "./types/index.d.ts"
+}

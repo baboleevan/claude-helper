@@ -81,10 +81,12 @@ mod는 Claude Code 화면·동작을 바꾸는 플러그인입니다. 이 저장
 # 다른 PC: GitHub에서 설치
 claude plugin marketplace add baboleevan/claude-helper
 claude plugin install changed-files@claude-helper
+claude plugin install decisions@claude-helper
 
 # 이 저장소를 고치는 PC: 클론한 폴더를 marketplace로 등록하면 폴더를 바로 읽습니다
 claude plugin marketplace add ~/github/claude-helper
 claude plugin install changed-files@claude-helper
+claude plugin install decisions@claude-helper
 ```
 
 - 설정 폴더가 여러 개면(Orca 프로필마다) `CLAUDE_CONFIG_DIR=<프로필 폴더> claude plugin install ...`처럼 폴더마다 설치합니다.
@@ -110,6 +112,19 @@ claude plugin install changed-files@claude-helper
   - 대화를 압축했으면 압축 전 기록은 다시 채우지 못할 수 있습니다.
   - Bash 호출마다 `git status`가 앞뒤로 돌고, 편집·Bash 뒤에는 `git status`와 `git log`가 한 번 더 돕니다.
   - "세션 시작"은 이어서 연 세션이면 처음 연 때입니다. 그 뒤 다른 사람이 커밋해 받아 온 파일도 커밋됨으로 보일 수 있습니다.
+
+### decisions — 결정 사항 패널
+
+- 오른쪽 패널(수정한 파일 패널 옆 탭)에 **결정할 것**(사용자가 정해야 할 것)과 **결정된 것**(최근 순)을 보여 줍니다. 탭 이름에 결정할 것 개수가 붙습니다.
+- 결정할 것마다 출처·배경, 선택지 버튼(번호·추천 표시)과 직접 입력칸이 있습니다. 고르면 기록하고 Claude에게 "[결정 사항] 제목 / 선택: ..." 메시지를 보냅니다. 세션이 비어 있으면 바로, 작업 중이면 끝난 뒤 이어서 진행합니다.
+- 항목이 생기는 길
+  - Claude가 도구로 올립니다: `mcp__decisions__add`(결정할 것), `record`(대화로 정한 것), `resolve`(대화로 답한 결정할 것 닫기), `list`(보기). 언제 쓰는지는 mod가 시스템 프롬프트에 안내를 더합니다.
+  - AskUserQuestion으로 받은 답은 자동으로 결정된 것에 기록합니다.
+- 기록은 워크스페이스마다 파일 하나(`~/.claude/decisions/<워크스페이스 이름>.json`)라서 이 PC의 모든 세션·설정 폴더가 같이 봅니다. 다른 세션이 바꾸면 10초 안에 다시 읽습니다.
+  - 워크스페이스: 메인 checkout의 상위 폴더에 `.worktrees`나 `CLAUDE.md`가 있으면 그 상위 폴더, 아니면 그 저장소, git 밖이면 세션 폴더입니다.
+  - 파일을 직접 고쳐도 됩니다(`{ "items": [...] }`). 모양이 깨진 항목은 건너뜁니다.
+- 패널이 안 보이면 `/decisions`로 엽니다.
+- 한계: 이름이 같은 워크스페이스는 같은 파일을 씁니다. 두 세션이 거의 같은 순간에 쓰면 늦게 쓴 쪽이 이깁니다(쓰기 직전에 다시 읽어 줄입니다).
 
 ## 테스트
 
