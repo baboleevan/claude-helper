@@ -9,7 +9,14 @@
 //      사진을 찍는 작업 트리는 파일을 바꾼 적 있는 곳, 세션 폴더, 이번·최근 명령에 경로가 나온 곳이다. mod를 불러온 뒤부터만 잡는다.
 //   3. mod를 불러올 때(세션 시작·다시 불러오기): 대화 기록에 남은 Edit·Write·NotebookEdit 호출로 목록을 채운다.
 //      대화를 압축했으면 압축 전 기록은 남아 있지 않을 수 있다.
+//
+// 목록은 커밋 여부로 나눠 보인다. 작업 트리마다 아래 두 가지를 읽어 둔다.
+//   - 미커밋: 지금 `git status`에 나오는 파일(수정·스테이징·추적 안 함·삭제)
+//   - 커밋됨: 이 세션이 시작된 뒤 지금 HEAD에 들어간 커밋의 파일(`git log --since=<세션 시작> --name-only`)
+//   둘 다 아니면 되돌려서 바뀐 것이 없는 파일이다. 작업 트리를 지웠으면(worktree remove는 커밋돼 있어야 지운다) 커밋됨으로 본다.
+//   편집·Bash 직후, 30초마다(세션 밖 터미널에서 커밋한 것), 새로고침 때 다시 읽는다.
 // git은 --no-optional-locks로 불러 index.lock을 잡지 않는다. 동시에 도는 사용자의 git 명령을 막지 않기 위해서다.
+// core.quotePath=false로 한글 파일 이름이 따옴표·8진수로 바뀌지 않게 한다(git log 경로를 목록 경로와 비교하므로).
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface, ToolCallResult } from 'claude-code'
@@ -21,7 +28,8 @@ const TITLE = '수정한 파일'
 // 값의 모양을 바꾸면 태그를 올린다. 이전 버전이 저장한 값은 다시 불러와도 남으므로, 태그가 다르면 초기값으로 읽는다.
 const EMPTY_LOG: FileLog = { list: [], seen: [] }
 const files = atom({ plugin: 'changed-files', key: 'files' } as const, EMPTY_LOG, { shape: 'files-2' })
-const trees = atom({ plugin: 'changed-files', key: 'trees' } as const, [], { shape: 'trees-1' })
+// trees-2: 작업 트리에 커밋 여부(dirty·committed·isGone·isChecked)를 더했다. 이전 값은 버리고 세션 시작 때 파일 목록으로 다시 만든다.
+const trees = atom({ plugin: 'changed-files', key: 'trees' } as const, [], { shape: 'trees-2' })
 const place = atom({ plugin: 'changed-files', key: 'place' } as const, null, { shape: 'place-1' })
 
 const MAX_FILES = 500
@@ -29,7 +37,8 @@ const MAX_FILES = 500
 const MAX_SEEN = 5000
 const MAX_SNAPSHOT_TREES = 8
 const MAX_RECENT_BASH_TREES = 4
-const BRANCH_REFRESH_MS = 30_000
+// 브랜치와 커밋 여부를 다시 읽는 주기. 세션 밖 터미널에서 커밋·checkout한 것을 맞춘다.
+const STATUS_REFRESH_MS = 30_000
 
 /** 폴더 하나의 git 정보: 작업 트리 최상위, 그 안에서 이 폴더의 상대 경로, 워크트리 여부, 공용 .git 폴더 */
 type DirInfo = { root: string; prefix: string; isLinked: boolean; commonDir: string }
@@ -59,6 +68,8 @@ const dirCache = new Map<string, DirInfo | null | 'missing'>()
 // 최근 Bash 명령에 나온 작업 트리. 이 세션은 Bash의 cd가 다음 호출로 이어지므로,
 // 앞 명령에서 cd한 워크트리를 다음 명령(경로 없이 sed -i 등)에서도 사진 찍도록 남겨 둔다. 다시 불러오면 비워진다.
 let recentBashTrees: string[] = []
+// 세션이 시작된 때(ISO). git log --since에 쓴다. 다시 불러오면 다시 읽는다.
+let sessionSince: string | null = null
 
 /** 경로의 상위 폴더 */
 function dirname(path: string): string {
@@ -133,7 +144,7 @@ function keepTail(text: string, max: number): string {
 
 /** git을 셸 없이 실행해 표준 출력을 돌려준다. 종료 코드가 0이 아니면 null. 폴더가 없어 시작하지 못하면 예외를 던진다 */
 async function git($: EngineInterface, cwd: string, args: readonly string[]): Promise<string | null> {
-  const ran = await $.process.run(['git', '--no-optional-locks', ...args], { cwd, timeoutMs: 5000 })
+  const ran = await $.process.run(['git', '-c', 'core.quotePath=false', '--no-optional-locks', ...args], { cwd, timeoutMs: 5000 })
   return ran.exitCode === 0 ? ran.stdout : null
 }
 
@@ -305,12 +316,17 @@ function mergeFile(list: ChangedFile[], change: Change, root: string | null, rel
   return list.map((one, j) => (j === i ? next : one))
 }
 
-/** 변경들을 기록한다. 이미 센 호출은 빼고, 처음 보는 작업 트리는 브랜치를 읽어 함께 넣는다 */
-async function applyChanges($: EngineInterface, incoming: readonly Change[]): Promise<void> {
+/** 새 작업 트리 기록을 만든다. 커밋 여부는 아직 읽지 않은 상태다 */
+function newTree(root: string, branch: string, isLinked: boolean, lastAt = 0): WorkTree {
+  return { root, branch, isLinked, lastAt, dirty: [], committed: [], isGone: false, isChecked: false }
+}
+
+/** 변경들을 기록한다. 이미 센 호출은 빼고, 처음 보는 작업 트리는 브랜치를 읽어 함께 넣는다. 기록한 작업 트리 경로를 돌려준다 */
+async function applyChanges($: EngineInterface, incoming: readonly Change[]): Promise<string[]> {
   // 다시 읽은 기록이 작업 트리의 마지막 변경 시각을 끌어올려 머리가 바뀌지 않게, 이미 센 호출은 처음부터 뺀다.
   const seenBefore = new Set((await read($, files)).seen)
   const changes = incoming.filter(change => change.id === undefined || !seenBefore.has(change.id))
-  if (changes.length === 0) return
+  if (changes.length === 0) return []
   const located: { change: Change; info: DirInfo | null; rel: string }[] = []
   for (const change of changes) {
     const found = change.located ?? (await locate($, dirname(change.path), basename(change.path)))
@@ -320,7 +336,7 @@ async function applyChanges($: EngineInterface, incoming: readonly Change[]): Pr
   const fresh = new Map<string, WorkTree>()
   for (const { info } of located) {
     if (info === null || known.has(info.root) || fresh.has(info.root)) continue
-    fresh.set(info.root, { root: info.root, branch: await branchOf($, info.root), isLinked: info.isLinked, lastAt: 0 })
+    fresh.set(info.root, newTree(info.root, await branchOf($, info.root), info.isLinked))
   }
   const lastAt = new Map<string, number>()
   for (const { change, info } of located) {
@@ -350,6 +366,7 @@ async function applyChanges($: EngineInterface, incoming: readonly Change[]): Pr
     }
     return { list, seen: [...log.seen, ...added].slice(-MAX_SEEN) }
   })
+  return [...new Set(located.flatMap(one => (one.info === null ? [] : [one.info.root])))]
 }
 
 /** Edit·Write 결과의 diff에서 더한 줄·지운 줄을 센다. 새로 만든 파일은 내용 줄 수를 더한 줄로 본다 */
@@ -385,7 +402,7 @@ async function recordTool(
 ): Promise<void> {
   if (ran.deny !== undefined || ran.isError === true) return
   const { added, removed, isCreate } = countLines(ran.result, input.content)
-  await applyChanges($, [
+  const roots = await applyChanges($, [
     {
       path: input.path,
       id: input.id,
@@ -397,6 +414,8 @@ async function recordTool(
       at: await $.clock.now(),
     },
   ])
+  // 방금 고친 파일은 미커밋이 된다. 그 작업 트리의 git 상태만 다시 읽는다.
+  await refreshStatus($, roots)
 }
 
 /** Bash 명령에서 경로로 보이는 낱말을 골라 절대 경로로 바꾼다('/'가 든 낱말, cd·-C 다음 낱말). 최대 12개 */
@@ -445,7 +464,7 @@ async function snapshotAll($: EngineInterface, roots: readonly string[]): Promis
   return shots.filter((shot): shot is Snapshot => shot !== null)
 }
 
-/** Bash가 끝난 뒤 사진을 다시 찍어 새로 바뀐 파일을 기록하고, 작업 트리의 브랜치 이름을 맞춘다 */
+/** Bash가 끝난 뒤 사진을 다시 찍어 새로 바뀐 파일을 기록하고, 작업 트리의 브랜치·커밋 여부를 맞춘다(git commit·checkout 반영) */
 async function recordBash(
   $: EngineInterface,
   before: readonly Snapshot[],
@@ -453,12 +472,10 @@ async function recordBash(
 ): Promise<void> {
   const at = await $.clock.now()
   const changes: Change[] = []
-  const branches = new Map<string, string>()
   const afterShots = await snapshotAll($, before.map(shot => shot.root))
   for (const prev of before) {
     const after = afterShots.find(shot => shot.root === prev.root)
     if (after === undefined) continue
-    branches.set(after.root, after.branch ?? (await branchOf($, after.root)))
     const info = await dirInfo($, after.root)
     const tree = info === 'missing' ? null : info
     for (const { rel, kind } of diffSnapshots(prev, after)) {
@@ -474,28 +491,111 @@ async function recordBash(
       })
     }
   }
-  await setBranches($, branches)
-  await applyChanges($, changes)
+  const touched = await applyChanges($, changes)
+  // 명령 뒤에 찍은 status를 그대로 써서 git status를 다시 부르지 않는다. 사진에 없던 새 작업 트리만 따로 읽는다.
+  await refreshStatus($, [...new Set([...afterShots.map(shot => shot.root), ...touched])], afterShots)
 }
 
-/** 바뀐 브랜치 이름만 상태에 쓴다. 같으면 쓰지 않아 패널을 괜히 다시 그리지 않는다 */
-async function setBranches($: EngineInterface, branches: ReadonlyMap<string, string>): Promise<void> {
+/** 세션이 시작된 때를 ISO 문자열로 돌려준다(git log --since 값). 읽지 못하면 하루 전으로 본다 */
+async function sinceOfSession($: EngineInterface): Promise<string> {
+  if (sessionSince !== null) return sessionSince
+  let startedAt = Number.NaN
+  try {
+    startedAt = (await $.session.usage()).startedAt
+  } catch {
+    // 세션 정보를 읽지 못하면 아래 기본값을 쓴다.
+  }
+  if (!Number.isFinite(startedAt)) startedAt = (await $.clock.now()) - 24 * 60 * 60 * 1000
+  sessionSince = new Date(startedAt).toISOString()
+  return sessionSince
+}
+
+/** 세션이 시작된 뒤 지금 HEAD에 커밋된 파일의 상대 경로(정렬). 읽지 못하면 빈 목록 */
+async function committedSince($: EngineInterface, root: string, since: string): Promise<string[]> {
+  try {
+    const out = await git($, root, ['log', `--since=${since}`, '--format=', '--name-only'])
+    return out === null ? [] : [...new Set(out.split('\n').filter(line => line !== ''))].sort()
+  } catch {
+    return []
+  }
+}
+
+/** 커밋 여부를 비교할 때 쓰는 작업 트리 값(마지막 변경 시각 제외) */
+type TreeStatus = Pick<WorkTree, 'branch' | 'dirty' | 'committed' | 'isGone' | 'isChecked'>
+
+/** 두 상태가 같은지 본다. 같으면 상태를 쓰지 않아 패널을 괜히 다시 그리지 않는다 */
+function sameStatus(tree: WorkTree, got: TreeStatus): boolean {
+  return (
+    tree.branch === got.branch &&
+    tree.isGone === got.isGone &&
+    tree.isChecked === got.isChecked &&
+    tree.dirty.join('\n') === got.dirty.join('\n') &&
+    tree.committed.join('\n') === got.committed.join('\n')
+  )
+}
+
+/**
+ * 작업 트리들의 브랜치와 커밋 여부(미커밋 파일·세션 시작 뒤 커밋된 파일·없어졌는지)를 다시 읽어 쓴다.
+ * roots가 없으면 아는 작업 트리 전부다. Bash 직후처럼 이미 찍은 status가 있으면 shots로 넘겨 git status를 다시 부르지 않는다.
+ * status를 못 읽었을 때 폴더가 정말 없으면 작업 트리가 없어진 것으로 본다. 폴더가 있으면(git 시간 초과·오류)
+ * 이전 상태를 그대로 둔다. git이 잠깐 실패했다고 "삭제됨 → 커밋됨"으로 보이면 커밋할 것을 놓치기 때문이다.
+ */
+async function refreshStatus($: EngineInterface, roots?: readonly string[], shots: readonly Snapshot[] = []): Promise<void> {
   const list = await read($, trees)
-  const isChanged = list.some(tree => branches.has(tree.root) && branches.get(tree.root) !== tree.branch)
+  const targets = (roots ?? list.map(tree => tree.root)).filter(root => list.some(tree => tree.root === root))
+  if (targets.length === 0) return
+  const since = await sinceOfSession($)
+  const found = new Map<string, TreeStatus>()
+  await Promise.all(
+    targets.map(async root => {
+      const shot = shots.find(one => one.root === root) ?? (await snapshot($, root))
+      const previous = list.find(tree => tree.root === root)
+      if (shot === null) {
+        // 있는지 확인하지 못하면 있다고 본다(삭제됨으로 잘못 보이는 쪽을 피한다).
+        const isThere = await $.fs.exists(root).catch(() => true)
+        if (!isThere) {
+          found.set(root, { branch: previous?.branch ?? '(알 수 없음)', dirty: [], committed: [], isGone: true, isChecked: true })
+        }
+        return
+      }
+      found.set(root, {
+        branch: shot.branch ?? (await branchOf($, root)),
+        dirty: [...shot.entries.keys()].sort(),
+        committed: await committedSince($, root, since),
+        isGone: false,
+        isChecked: true,
+      })
+    }),
+  )
+  const isChanged = list.some(tree => {
+    const got = found.get(tree.root)
+    return got !== undefined && !sameStatus(tree, got)
+  })
   if (!isChanged) return
   await update($, trees, current =>
     current.map(tree => {
-      const branch = branches.get(tree.root)
-      return branch === undefined || branch === tree.branch ? tree : { ...tree, branch }
+      const got = found.get(tree.root)
+      return got === undefined || sameStatus(tree, got) ? tree : { ...tree, ...got }
     }),
   )
 }
 
-/** 아는 작업 트리의 브랜치를 모두 다시 읽는다(세션 밖에서 checkout한 경우를 맞춘다) */
-async function refreshBranches($: EngineInterface): Promise<void> {
-  const branches = new Map<string, string>()
-  for (const tree of await read($, trees)) branches.set(tree.root, await branchOf($, tree.root))
-  await setBranches($, branches)
+/** 수정한 파일이 속한 작업 트리가 목록에 없으면 넣는다(이전 버전의 값을 버렸거나 다시 불러온 경우) */
+async function ensureTrees($: EngineInterface): Promise<void> {
+  const known = new Set((await read($, trees)).map(tree => tree.root))
+  const lastAt = new Map<string, number>()
+  for (const file of (await read($, files)).list) {
+    if (file.root === null || known.has(file.root)) continue
+    lastAt.set(file.root, Math.max(lastAt.get(file.root) ?? 0, file.lastAt))
+  }
+  if (lastAt.size === 0) return
+  const fresh: WorkTree[] = []
+  for (const [root, at] of lastAt) {
+    const info = await dirInfo($, root)
+    const isLinked = info !== null && info !== 'missing' && info.isLinked
+    fresh.push(newTree(root, await branchOf($, root), isLinked, at))
+  }
+  await update($, trees, list => [...list, ...fresh.filter(tree => !list.some(one => one.root === tree.root))])
 }
 
 /** 대화 기록 한 묶음에서 성공한 파일 도구 호출을 변경으로 옮긴다 */
@@ -547,16 +647,40 @@ async function setupPlace($: EngineInterface, cwd: string): Promise<void> {
   if (info === null) return
   const known = (await read($, trees)).some(tree => tree.root === info.root)
   if (known) return
-  const tree: WorkTree = { root: info.root, branch: await branchOf($, info.root), isLinked: info.isLinked, lastAt: 0 }
+  const tree = newTree(info.root, await branchOf($, info.root), info.isLinked)
   await update($, trees, list => (list.some(one => one.root === tree.root) ? list : [...list, tree]))
 }
 
-/** 머리에 보일 작업 트리: 마지막으로 파일을 바꾼 곳, 아직 없으면 세션 폴더의 작업 트리 */
+/** 머리에 보일 작업 트리: 마지막으로 파일을 바꾼 곳(지운 작업 트리는 빼고), 아직 없으면 세션 폴더의 작업 트리 */
 function currentTree(list: readonly WorkTree[], where: Place | null): WorkTree | null {
-  const active = [...list].sort((a, b) => b.lastAt - a.lastAt)[0]
+  const active = list.filter(tree => !tree.isGone).sort((a, b) => b.lastAt - a.lastAt)[0]
   if (active !== undefined && active.lastAt > 0) return active
   const cwd = where?.cwd
   return list.find(tree => cwd !== undefined && under(tree.root, cwd) !== null) ?? active ?? null
+}
+
+/** 파일 하나의 커밋 여부: 미커밋, 커밋됨, 커밋 기록 없음(되돌림·git이 무시하는 파일·다른 브랜치에 커밋 등), 저장소 밖 */
+type CommitState = 'uncommitted' | 'committed' | 'noRecord' | 'outside'
+
+/** 패널 구역 순서와 제목. 미커밋을 맨 위에 둔다(커밋할 것을 먼저 본다) */
+const SECTIONS: readonly { state: CommitState; title: string; color?: 'warning' | 'success' }[] = [
+  { state: 'uncommitted', title: '미커밋', color: 'warning' },
+  { state: 'committed', title: '커밋됨', color: 'success' },
+  { state: 'noRecord', title: '커밋 기록 없음' },
+  { state: 'outside', title: '저장소 밖' },
+]
+
+/**
+ * 파일이 지금 커밋됐는지 정한다. git 상태를 아직 못 읽었으면 미커밋으로 본다(방금 고친 파일이 대부분이다).
+ * 작업 트리를 지웠으면 커밋됨이다(worktree remove는 바뀐 파일이 있으면 지우지 않는다).
+ */
+function commitStateOf(file: ChangedFile, tree: WorkTree | undefined): CommitState {
+  if (file.root === null) return 'outside'
+  if (tree === undefined || !tree.isChecked) return 'uncommitted'
+  if (tree.isGone) return 'committed'
+  if (tree.dirty.includes(file.rel)) return 'uncommitted'
+  if (tree.committed.includes(file.rel)) return 'committed'
+  return 'noRecord'
 }
 
 /** 파일 행 끝에 붙일 숫자·꼬리표: +더한 줄 −지운 줄 ×횟수 Bash 에이전트 */
@@ -593,11 +717,12 @@ async function clearAll($: EngineInterface): Promise<void> {
   $.ui.toast('수정한 파일 목록을 비웠습니다')
 }
 
-/** 브랜치를 다시 읽고 대화 기록으로 빠진 파일을 채운다 */
+/** 대화 기록으로 빠진 파일을 채우고, 작업 트리의 브랜치·커밋 여부를 다시 읽는다 */
 async function refreshAll($: EngineInterface): Promise<void> {
-  await refreshBranches($)
   await backfill($)
-  $.ui.toast('브랜치와 수정한 파일 목록을 다시 읽었습니다')
+  await ensureTrees($)
+  await refreshStatus($)
+  $.ui.toast('브랜치·커밋 여부와 수정한 파일 목록을 다시 읽었습니다')
 }
 
 /** 패널을 연다. 사람이 명령으로 열면 화면 폭과 상관없이 자리를 잡는다 */
@@ -607,19 +732,21 @@ async function openPane($: EngineInterface): Promise<string> {
 }
 
 export const register: Register = on => {
-  // 세션 시작·다시 불러오기마다: 명령 등록, 경로 기준 설정, 대화 기록으로 목록 채우기, 패널 열기, 브랜치 주기 확인.
+  // 세션 시작·다시 불러오기마다: 명령 등록, 경로 기준 설정, 대화 기록으로 목록 채우기, 커밋 여부 읽기, 패널 열기, 주기 확인.
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     try {
       await $.command.register({ name: 'changed-files', description: '이 세션에서 수정한 파일과 작업 중인 워크트리·브랜치 패널을 엽니다' })
       await setupPlace($, e.cwd)
       await backfill($)
+      await ensureTrees($)
+      await refreshStatus($)
     } catch (error) {
       $.ui.log(`changed-files: 시작 준비 중 오류: ${String(error)}`)
     }
     void $.ui.open({ id: PANE, title: TITLE })
-    $.clock.every(BRANCH_REFRESH_MS, () => {
-      void refreshBranches($).catch(() => undefined)
+    $.clock.every(STATUS_REFRESH_MS, () => {
+      void refreshStatus($).catch(() => undefined)
     })
     return started
   })
@@ -690,11 +817,16 @@ export const register: Register = on => {
     const current = currentTree(treeList, where)
     const currentLabel = current === null ? null : treeLabel(current.root, where)
 
+    const stateOf = (file: ChangedFile) => commitStateOf(file, treeList.find(tree => tree.root === file.root))
+    const countOf = (state: CommitState) => list.filter(file => stateOf(file) === state).length
+
     if (e.props.placement === 'widget') {
       return (
         <Box flexDirection="column">
           <Text bold>{current?.branch ?? '브랜치 없음'}</Text>
-          <Text dimColor>수정한 파일 {list.length}개</Text>
+          <Text dimColor>
+            미커밋 {countOf('uncommitted')} · 커밋됨 {countOf('committed')}
+          </Text>
         </Box>
       )
     }
@@ -724,46 +856,60 @@ export const register: Register = on => {
         </Box>
       )
 
-    // 작업 트리별로 묶고, 묶음과 그 안의 파일을 최근 순으로 둔다. 저장소 밖 파일은 마지막 묶음이다.
-    const groups = new Map<string, ChangedFile[]>()
-    for (const file of [...list].sort((a, b) => b.lastAt - a.lastAt)) {
-      const key = file.root ?? ''
-      groups.set(key, [...(groups.get(key) ?? []), file])
-    }
-    const ordered = [...groups.entries()].sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : 0))
     const isInline = e.props.placement === 'inline'
-    // 입력창 위에 놓일 때는 대화를 가리지 않게 최근 파일 몇 개만 보인다.
+    // 입력창 위에 놓일 때는 대화를 가리지 않게 최근 파일 몇 개만 보인다(미커밋부터).
     const inlineLimit = 6
     let shown = 0
-    const rows = []
-    for (const [root, group] of ordered) {
-      const visible = isInline ? group.slice(0, Math.max(0, inlineLimit - shown)) : group
+    const recent = [...list].sort((a, b) => b.lastAt - a.lastAt)
+
+    // 파일 한 줄: 변경 종류·경로·숫자 꼬리표. 커밋된 파일은 경로를 흐리게 보인다. 누르면 경로를 복사한다.
+    // Button 안에는 글과 Text만 둔다. 숫자가 없을 때 false 같은 값이 끼지 않게 두 모양으로 나눈다.
+    const fileRow = (file: ChangedFile, state: CommitState) => {
+      const mark = markOf(file.kind)
+      const stats = statsOf(file)
+      const shownPath = file.root === null ? tilde(file.path, where?.home ?? null) : file.rel
+      const room = Math.max(12, width - 4 - (stats === '' ? 0 : widthOf(stats) + 1))
+      const path = keepTail(shownPath, room)
+      const isDim = state === 'committed' || state === 'noRecord'
+      const copyText = fileLabel(file, where)
+      const key = `${state}:${keyOf(file)}`
+      return stats === '' ? (
+        <Button key={key} plain onPress={() => copyPath($, e.surface, copyText)}>
+          <Text color={mark.color}>{mark.text}</Text> <Text dimColor={isDim}>{path}</Text>
+        </Button>
+      ) : (
+        <Button key={key} plain onPress={() => copyPath($, e.surface, copyText)}>
+          <Text color={mark.color}>{mark.text}</Text> <Text dimColor={isDim}>{path}</Text>
+          <Text dimColor> {stats}</Text>
+        </Button>
+      )
+    }
+
+    // 구역(미커밋·커밋됨·커밋 기록 없음·저장소 밖) 안에서 작업 트리별로 묶는다. 묶음과 파일은 최근 순이다.
+    const sections = []
+    for (const section of SECTIONS) {
+      const inSection = recent.filter(file => stateOf(file) === section.state)
+      const visible = isInline ? inSection.slice(0, Math.max(0, inlineLimit - shown)) : inSection
       if (visible.length === 0) continue
       shown += visible.length
-      const tree = treeList.find(one => one.root === root)
-      const title = root === '' ? '저장소 밖' : treeLabel(root, where)
-      rows.push(
+      const groups = new Map<string, ChangedFile[]>()
+      for (const file of visible) groups.set(file.root ?? '', [...(groups.get(file.root ?? '') ?? []), file])
+      sections.push(
         <Box flexDirection="column" marginTop={1}>
-          <Text bold>{keepTail(title, width)}</Text>
-          {tree !== undefined && <Text dimColor>{keepTail(`브랜치 ${tree.branch}`, width)}</Text>}
-          {visible.map(file => {
-            const mark = markOf(file.kind)
-            const stats = statsOf(file)
-            const shownPath = file.root === null ? tilde(file.path, where?.home ?? null) : file.rel
-            const room = Math.max(12, width - 4 - (stats === '' ? 0 : widthOf(stats) + 1))
-            const path = keepTail(shownPath, room)
-            const copyText = fileLabel(file, where)
-            const key = `file:${keyOf(file)}`
-            // Button 안에는 글과 Text만 둔다. 숫자가 없을 때 false 같은 값이 끼지 않게 두 모양으로 나눈다.
-            return stats === '' ? (
-              <Button key={key} plain onPress={() => copyPath($, e.surface, copyText)}>
-                <Text color={mark.color}>{mark.text}</Text> {path}
-              </Button>
+          <Text bold color={section.color}>
+            {section.title} {inSection.length}
+          </Text>
+          {[...groups.entries()].map(([root, group]) => {
+            const tree = treeList.find(one => one.root === root)
+            const branchLine = tree === undefined ? '' : tree.isGone ? '작업 트리 삭제됨' : `브랜치 ${tree.branch}`
+            return root === '' ? (
+              <Box flexDirection="column">{group.map(file => fileRow(file, section.state))}</Box>
             ) : (
-              <Button key={key} plain onPress={() => copyPath($, e.surface, copyText)}>
-                <Text color={mark.color}>{mark.text}</Text> {path}
-                <Text dimColor> {stats}</Text>
-              </Button>
+              <Box flexDirection="column">
+                <Text>{keepTail(treeLabel(root, where), width)}</Text>
+                {branchLine !== '' && <Text dimColor>{keepTail(branchLine, width)}</Text>}
+                {group.map(file => fileRow(file, section.state))}
+              </Box>
             )
           })}
         </Box>,
@@ -779,13 +925,13 @@ export const register: Register = on => {
           <Text bold>수정한 파일 {list.length}개</Text>
         </Box>
         {list.length === 0 && <Text dimColor>아직 수정한 파일이 없습니다.</Text>}
-        {rows}
+        {sections}
         {isInline && hidden > 0 && <Text dimColor>외 {hidden}개 (fullscreen 화면에서 모두 보입니다)</Text>}
         <Box flexDirection="row" marginTop={1} gap={1}>
           <Button key="refresh" label="새로고침" onPress={() => refreshAll($)} />
           <Button key="clear" label="비우기" onPress={() => clearAll($)} />
         </Box>
-        <Text dimColor>행을 누르면 경로를 복사합니다. Bash 변경은 git 상태 비교로 찾습니다.</Text>
+        <Text dimColor>행을 누르면 경로를 복사합니다. 커밋 여부는 git status와 세션 시작 뒤 git log로 30초마다 다시 봅니다.</Text>
       </Box>
     )
   })
