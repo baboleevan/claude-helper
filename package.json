@@ -8,6 +8,6 @@
   },
   "scripts": {
     "test": "node --test hooks/*/*.test.mjs install.test.mjs",
-    "test:mods": "claude plugin validate . && claude plugin test mods/changed-files && claude plugin test mods/decisions"
+    "test:mods": "claude plugin validate . && claude plugin test mods/changed-files && claude plugin test mods/decisions && claude plugin test mods/model-switch"
   }
 }
