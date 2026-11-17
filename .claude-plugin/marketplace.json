@@ -1,12 +1,21 @@
 {
   "name": "claude-helper",
-  "owner": { "name": "baboleevan" },
-  "metadata": { "description": "Claude Code에서 쓰는 개인 mod 모음" },
+  "owner": {
+    "name": "baboleevan"
+  },
+  "metadata": {
+    "description": "Claude Code에서 쓰는 개인 mod 모음"
+  },
   "plugins": [
     {
       "name": "changed-files",
       "source": "./mods/changed-files",
       "description": "오른쪽 패널에 지금 작업 중인 워크트리·브랜치와 이 세션에서 수정한 파일 목록을 실시간으로 보여 준다"
+    },
+    {
+      "name": "decisions",
+      "source": "./mods/decisions",
+      "description": "오른쪽 패널에 사용자가 정해야 할 것과 이미 정한 것을 보여 주고, 패널에서 바로 골라 Claude에게 전달한다"
     }
   ]
 }
