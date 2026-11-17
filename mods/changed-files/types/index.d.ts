@@ -44,6 +44,14 @@ export type WorkTree = {
   isLinked: boolean
   /** 이 작업 트리에서 마지막으로 파일을 바꾼 때. 아직 없으면 0 */
   lastAt: number
+  /** 아직 커밋하지 않은 파일(`git status`에 나온 상대 경로: 수정·스테이징·추적 안 함·삭제) */
+  dirty: string[]
+  /** 이 세션이 시작된 뒤 지금 HEAD에 커밋된 파일(`git log --since --name-only`의 상대 경로) */
+  committed: string[]
+  /** 작업 트리가 없어졌는지(worktree를 지움). 지우려면 커밋돼 있어야 하므로 그 안 파일은 커밋됨으로 본다 */
+  isGone: boolean
+  /** git 상태를 한 번이라도 읽었는지. 읽기 전에는 파일을 미커밋으로 본다 */
+  isChecked: boolean
 }
 
 /** 경로를 짧게 보이는 데 쓰는 기준 */

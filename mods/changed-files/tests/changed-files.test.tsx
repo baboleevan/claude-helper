@@ -5,7 +5,6 @@ import type { On } from 'claude-code'
 // 세션 폴더는 메인 checkout이고 실제 수정은 워크트리에서 한다. 이 mod가 막으려는 상황이 바로 이것이다.
 const MAIN = '/w/docs'
 const TREE = '/w/.worktrees/T1/docs'
-const DIRS = new Set(['/', '/w', MAIN, `${MAIN}/std`, '/w/.worktrees', '/w/.worktrees/T1', TREE, `${TREE}/std`])
 
 const PANE = {
   plugin: 'changed-files',
@@ -21,12 +20,13 @@ const PANE = {
   },
 } as const
 
-/** 테스트 하나가 쓰는 가짜 git 상태: 작업 트리별 브랜치와 git status 줄 */
-type World = { branch: Map<string, string>; status: Map<string, string[]> }
+/** 테스트 하나가 쓰는 가짜 git 상태: 있는 폴더, 작업 트리별 브랜치·git status 줄·세션 시작 뒤 커밋된 파일 */
+type World = { dirs: Set<string>; branch: Map<string, string>; status: Map<string, string[]>; log: Map<string, string[]> }
 
 /** 처음 상태의 가짜 git을 만든다 */
 function newWorld(): World {
   return {
+    dirs: new Set(['/', '/w', MAIN, `${MAIN}/std`, '/w/.worktrees', '/w/.worktrees/T1', TREE, `${TREE}/std`]),
     branch: new Map([
       [MAIN, 'develop'],
       [TREE, 'feature/T1-작업'],
@@ -35,12 +35,31 @@ function newWorld(): World {
       [MAIN, ['?? DB.md']],
       [TREE, []],
     ]),
+    log: new Map([
+      [MAIN, []],
+      [TREE, []],
+    ]),
   }
 }
 
-/** 실제 git 대신 rev-parse·branch·status에 답한다. 없는 폴더는 시작하지 못한 것으로 거부한다 */
+/** 파일 경로가 속한 가짜 작업 트리와 그 안의 상대 경로. 저장소 밖이면 null */
+function splitPath(path: string): { root: string; rel: string } | null {
+  const root = path.startsWith(`${TREE}/`) ? TREE : path.startsWith(`${MAIN}/`) ? MAIN : null
+  return root === null ? null : { root, rel: path.slice(root.length + 1) }
+}
+
+/** 고친 파일을 git status에 올린다(이미 있으면 그대로). 새 파일이면 ??, 아니면 수정이다 */
+function markDirty(world: World, path: string, isNew: boolean) {
+  const at = splitPath(path)
+  if (at === null) return
+  const lines = world.status.get(at.root) ?? []
+  if (!lines.some(line => line.slice(3) === at.rel)) lines.push(`${isNew ? '??' : ' M'} ${at.rel}`)
+  world.status.set(at.root, lines)
+}
+
+/** 실제 git 대신 rev-parse·branch·status·log에 답한다. 없는 폴더는 시작하지 못한 것으로 거부한다 */
 function fakeGit(world: World, argv: readonly string[], cwd: string) {
-  if (!DIRS.has(cwd)) return { deny: `no such directory: ${cwd}` }
+  if (!world.dirs.has(cwd)) return { deny: `no such directory: ${cwd}` }
   const root = cwd.startsWith(TREE) ? TREE : cwd.startsWith(MAIN) ? MAIN : null
   const ok = (stdout: string) => ({
     value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
@@ -50,8 +69,10 @@ function fakeGit(world: World, argv: readonly string[], cwd: string) {
       value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false },
     }
   }
-  const args = argv.slice(2).join(' ')
+  // mod는 git -c core.quotePath=false --no-optional-locks <명령>으로 부른다. 앞의 옵션을 떼고 명령만 본다.
+  const args = argv.slice(argv.indexOf('--no-optional-locks') + 1).join(' ')
   const branch = world.branch.get(root) ?? 'develop'
+  if (args.startsWith('log --since=')) return ok((world.log.get(root) ?? []).map(rel => `${rel}\n`).join(''))
   if (args.startsWith('rev-parse --path-format=absolute')) {
     const gitDir = root === TREE ? `${MAIN}/.git/worktrees/docs` : `${MAIN}/.git`
     const rest = cwd === root ? '' : `${cwd.slice(root.length + 1)}/`
@@ -66,24 +87,40 @@ function fakeGit(world: World, argv: readonly string[], cwd: string) {
   return ok('')
 }
 
-/** 엔진 자리에 서는 훅들: 시계·환경·명령 등록·패널·대화 기록·git·도구 결과 */
+/** 엔진 자리에 서는 훅들: 시계·환경·명령 등록·패널·대화 기록·git·도구 결과. 시계를 돌려야 하는 테스트를 위해 시계를 돌려준다 */
 function standIn(on: On, world: World, history: unknown[] = []) {
-  mock.clock(on, { now: 1_700_000_000_000 })
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
   mock.env(on, { HOME: '/home/u' })
   on('command.register', () => ({ value: { command: 'changed-files' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.messages', () => ({ value: history as never }))
+  on('session.usage', () => ({ value: { startedAt: 1_699_999_000_000, context: {}, rateLimits: [] } as never }))
   on('process.run', (_, e) => fakeGit(world, e.argv, e.init?.cwd ?? MAIN) as never)
   on('tool.call', (_, e) => {
     if (e.tool === 'Edit') {
       if (e.file_path.includes('denied')) return { deny: '사용자가 거부함' }
+      markDirty(world, e.file_path, false)
       return {
         result: { structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, lines: ['-a', '+b', '+c'] }] },
       } as never
     }
-    if (e.tool === 'Write') return { result: { type: 'create', structuredPatch: [] } } as never
+    if (e.tool === 'Write') {
+      markDirty(world, e.file_path, true)
+      return { result: { type: 'create', structuredPatch: [] } } as never
+    }
+    if (e.tool === 'NotebookEdit') {
+      markDirty(world, e.notebook_path, false)
+      return { result: {} } as never
+    }
+    if (e.tool === 'Bash' && e.command.includes('git commit')) {
+      // 워크트리의 바뀐 파일을 모두 커밋한 것처럼, status에서 빼고 세션 시작 뒤 커밋 기록에 넣는다.
+      const lines = world.status.get(TREE) ?? []
+      world.log.set(TREE, [...(world.log.get(TREE) ?? []), ...lines.map(line => line.slice(3))])
+      world.status.set(TREE, [])
+      return { result: { stdout: '', stderr: '' } } as never
+    }
     if (e.tool === 'Bash') {
       // 명령이 워크트리 파일을 고치고 새 파일을 만들고 브랜치를 바꾼 것처럼 git 상태를 바꾼다.
       world.status.set(TREE, [' M std/README.md', '?? std/added.md'])
@@ -92,6 +129,14 @@ function standIn(on: On, world: World, history: unknown[] = []) {
     }
     return { result: {} } as never
   })
+  return clock
+}
+
+/** 그린 패널에서 파일 행(Button)을 상대 경로로 찾아 그 행의 커밋 여부(키 앞부분)를 돌려준다. 없으면 undefined */
+async function stateOfRow(ui: { findAll: (query: { type: string }) => Promise<{ key: string | undefined }[]> }, rel: string) {
+  const rows = await ui.findAll({ type: 'Button' })
+  const row = rows.find(one => one.key !== undefined && one.key.endsWith(`\n${rel}`))
+  return row?.key?.split(':')[0]
 }
 
 // 세션 폴더가 메인 checkout이어도, 워크트리 파일을 고치면 머리에 그 워크트리와 브랜치가 보여야 한다.
@@ -232,7 +277,7 @@ test('저장소 밖 파일은 따로 묶어 ~ 경로로 보인다', async ($, on
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: '저장소 밖' }))?.text).toBe('저장소 밖')
+    expect((await ui.find({ type: 'Text', text: /^저장소 밖/ }))?.text).toBe('저장소 밖 1')
     expect(await ui.find({ type: 'Button', text: /~\/notes\/a\.md/ })).toBeDefined()
     await ui.unmount()
   }
@@ -262,5 +307,63 @@ test('입력창 위에 놓이면 최근 6개만 보인다', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, placement: 'inline' } })
   expect((await ui.findAll({ type: 'Button', text: /std\/f\d\.md/ })).length).toBe(6)
   expect((await ui.find({ type: 'Text', text: /^외 \d+개/ }))?.text).toBe('외 2개 (fullscreen 화면에서 모두 보입니다)')
+  await ui.unmount()
+})
+
+// 커밋할 것이 남았는지 한눈에 보이도록, 세션에서 고친 파일을 커밋한 것과 아직 커밋하지 않은 것으로 나눠 보여야 한다.
+test('커밋한 파일과 커밋하지 않은 파일을 나눠 보인다', async ($, on) => {
+  const world = newWorld()
+  standIn(on, world)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Edit', file_path: `${TREE}/std/a.md`, old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Bash', command: `cd ${TREE} && git commit -am 'a 고침'` })
+  await $.tool.call({ tool: 'Edit', file_path: `${TREE}/std/b.md`, old_string: 'a', new_string: 'b' })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await stateOfRow(ui, 'std/a.md')).toBe('committed')
+    expect(await stateOfRow(ui, 'std/b.md')).toBe('uncommitted')
+    expect((await ui.find({ type: 'Text', text: /^미커밋/ }))?.text).toBe('미커밋 1')
+    expect((await ui.find({ type: 'Text', text: /^커밋됨/ }))?.text).toBe('커밋됨 1')
+    await ui.unmount()
+  }
+})
+
+// 사람이 세션 밖 터미널에서 커밋하거나 되돌려도, 30초마다 git 상태를 다시 읽어 맞춰야 한다.
+test('세션 밖에서 커밋·되돌린 것을 주기적으로 다시 읽는다', async ($, on) => {
+  const world = newWorld()
+  const clock = standIn(on, world)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Edit', file_path: `${TREE}/std/a.md`, old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Edit', file_path: `${TREE}/std/b.md`, old_string: 'a', new_string: 'b' })
+
+  // 터미널에서 a.md는 커밋하고 b.md는 되돌렸다(status에서 빠지고 커밋 기록에도 없다).
+  world.status.set(TREE, [])
+  world.log.set(TREE, ['std/a.md'])
+  await clock.advance(30_000)
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await stateOfRow(ui, 'std/a.md')).toBe('committed')
+  expect(await stateOfRow(ui, 'std/b.md')).toBe('unchanged')
+  expect(await ui.find({ type: 'Text', text: /^미커밋/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+// 머지 뒤 워크트리를 지우면 그 안 파일은 커밋된 것이다. 머리는 지운 워크트리 대신 세션 폴더를 보여야 한다.
+test('지운 워크트리의 파일은 커밋됨으로 보이고 머리는 세션 폴더로 돌아간다', async ($, on) => {
+  const world = newWorld()
+  standIn(on, world)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Edit', file_path: `${TREE}/std/a.md`, old_string: 'a', new_string: 'b' })
+
+  world.dirs.delete(TREE)
+  world.dirs.delete(`${TREE}/std`)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+
+  expect(await stateOfRow(ui, 'std/a.md')).toBe('committed')
+  expect((await ui.find({ type: 'Text', text: '작업 트리 삭제됨' }))?.text).toBe('작업 트리 삭제됨')
+  expect((await ui.find({ type: 'Text', text: 'docs (메인)' }))?.text).toBe('docs (메인)')
   await ui.unmount()
 })
