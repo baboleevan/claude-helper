@@ -537,7 +537,8 @@ function sameStatus(tree: WorkTree, got: TreeStatus): boolean {
 /**
  * 작업 트리들의 브랜치와 커밋 여부(미커밋 파일·세션 시작 뒤 커밋된 파일·없어졌는지)를 다시 읽어 쓴다.
  * roots가 없으면 아는 작업 트리 전부다. Bash 직후처럼 이미 찍은 status가 있으면 shots로 넘겨 git status를 다시 부르지 않는다.
- * status를 못 읽으면(폴더가 없어짐) 작업 트리가 없어진 것으로 본다.
+ * status를 못 읽었을 때 폴더가 정말 없으면 작업 트리가 없어진 것으로 본다. 폴더가 있으면(git 시간 초과·오류)
+ * 이전 상태를 그대로 둔다. git이 잠깐 실패했다고 "삭제됨 → 커밋됨"으로 보이면 커밋할 것을 놓치기 때문이다.
  */
 async function refreshStatus($: EngineInterface, roots?: readonly string[], shots: readonly Snapshot[] = []): Promise<void> {
   const list = await read($, trees)
@@ -550,7 +551,11 @@ async function refreshStatus($: EngineInterface, roots?: readonly string[], shot
       const shot = shots.find(one => one.root === root) ?? (await snapshot($, root))
       const previous = list.find(tree => tree.root === root)
       if (shot === null) {
-        found.set(root, { branch: previous?.branch ?? '(알 수 없음)', dirty: [], committed: [], isGone: true, isChecked: true })
+        // 있는지 확인하지 못하면 있다고 본다(삭제됨으로 잘못 보이는 쪽을 피한다).
+        const isThere = await $.fs.exists(root).catch(() => true)
+        if (!isThere) {
+          found.set(root, { branch: previous?.branch ?? '(알 수 없음)', dirty: [], committed: [], isGone: true, isChecked: true })
+        }
         return
       }
       found.set(root, {
@@ -654,14 +659,14 @@ function currentTree(list: readonly WorkTree[], where: Place | null): WorkTree |
   return list.find(tree => cwd !== undefined && under(tree.root, cwd) !== null) ?? active ?? null
 }
 
-/** 파일 하나의 커밋 여부: 미커밋, 커밋됨, 변경 없음(되돌림), 저장소 밖 */
-type CommitState = 'uncommitted' | 'committed' | 'unchanged' | 'outside'
+/** 파일 하나의 커밋 여부: 미커밋, 커밋됨, 커밋 기록 없음(되돌림·git이 무시하는 파일·다른 브랜치에 커밋 등), 저장소 밖 */
+type CommitState = 'uncommitted' | 'committed' | 'noRecord' | 'outside'
 
 /** 패널 구역 순서와 제목. 미커밋을 맨 위에 둔다(커밋할 것을 먼저 본다) */
 const SECTIONS: readonly { state: CommitState; title: string; color?: 'warning' | 'success' }[] = [
   { state: 'uncommitted', title: '미커밋', color: 'warning' },
   { state: 'committed', title: '커밋됨', color: 'success' },
-  { state: 'unchanged', title: '변경 없음(되돌림)' },
+  { state: 'noRecord', title: '커밋 기록 없음' },
   { state: 'outside', title: '저장소 밖' },
 ]
 
@@ -675,7 +680,7 @@ function commitStateOf(file: ChangedFile, tree: WorkTree | undefined): CommitSta
   if (tree.isGone) return 'committed'
   if (tree.dirty.includes(file.rel)) return 'uncommitted'
   if (tree.committed.includes(file.rel)) return 'committed'
-  return 'unchanged'
+  return 'noRecord'
 }
 
 /** 파일 행 끝에 붙일 숫자·꼬리표: +더한 줄 −지운 줄 ×횟수 Bash 에이전트 */
@@ -865,7 +870,7 @@ export const register: Register = on => {
       const shownPath = file.root === null ? tilde(file.path, where?.home ?? null) : file.rel
       const room = Math.max(12, width - 4 - (stats === '' ? 0 : widthOf(stats) + 1))
       const path = keepTail(shownPath, room)
-      const isDim = state === 'committed' || state === 'unchanged'
+      const isDim = state === 'committed' || state === 'noRecord'
       const copyText = fileLabel(file, where)
       const key = `${state}:${keyOf(file)}`
       return stats === '' ? (
@@ -880,7 +885,7 @@ export const register: Register = on => {
       )
     }
 
-    // 구역(미커밋·커밋됨·변경 없음·저장소 밖) 안에서 작업 트리별로 묶는다. 묶음과 파일은 최근 순이다.
+    // 구역(미커밋·커밋됨·커밋 기록 없음·저장소 밖) 안에서 작업 트리별로 묶는다. 묶음과 파일은 최근 순이다.
     const sections = []
     for (const section of SECTIONS) {
       const inSection = recent.filter(file => stateOf(file) === section.state)

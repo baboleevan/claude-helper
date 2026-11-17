@@ -21,7 +21,14 @@ const PANE = {
 } as const
 
 /** 테스트 하나가 쓰는 가짜 git 상태: 있는 폴더, 작업 트리별 브랜치·git status 줄·세션 시작 뒤 커밋된 파일 */
-type World = { dirs: Set<string>; branch: Map<string, string>; status: Map<string, string[]>; log: Map<string, string[]> }
+type World = {
+  dirs: Set<string>
+  branch: Map<string, string>
+  status: Map<string, string[]>
+  log: Map<string, string[]>
+  // true면 폴더는 있는데 git status·log가 실패한다(시간 초과·저장소 오류 흉내)
+  isGitBroken: boolean
+}
 
 /** 처음 상태의 가짜 git을 만든다 */
 function newWorld(): World {
@@ -39,6 +46,7 @@ function newWorld(): World {
       [MAIN, []],
       [TREE, []],
     ]),
+    isGitBroken: false,
   }
 }
 
@@ -72,6 +80,9 @@ function fakeGit(world: World, argv: readonly string[], cwd: string) {
   // mod는 git -c core.quotePath=false --no-optional-locks <명령>으로 부른다. 앞의 옵션을 떼고 명령만 본다.
   const args = argv.slice(argv.indexOf('--no-optional-locks') + 1).join(' ')
   const branch = world.branch.get(root) ?? 'develop'
+  if (world.isGitBroken && (args.startsWith('status') || args.startsWith('log'))) {
+    return { value: { exitCode: 128, stdout: '', stderr: 'fatal: unable to read index', isStdoutTruncated: false, isStderrTruncated: false } }
+  }
   if (args.startsWith('log --since=')) return ok((world.log.get(root) ?? []).map(rel => `${rel}\n`).join(''))
   if (args.startsWith('rev-parse --path-format=absolute')) {
     const gitDir = root === TREE ? `${MAIN}/.git/worktrees/docs` : `${MAIN}/.git`
@@ -97,6 +108,7 @@ function standIn(on: On, world: World, history: unknown[] = []) {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.messages', () => ({ value: history as never }))
   on('session.usage', () => ({ value: { startedAt: 1_699_999_000_000, context: {}, rateLimits: [] } as never }))
+  on('fs.exists', (_, e) => ({ value: world.dirs.has(e.path) }))
   on('process.run', (_, e) => fakeGit(world, e.argv, e.init?.cwd ?? MAIN) as never)
   on('tool.call', (_, e) => {
     if (e.tool === 'Edit') {
@@ -345,7 +357,7 @@ test('세션 밖에서 커밋·되돌린 것을 주기적으로 다시 읽는다
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await stateOfRow(ui, 'std/a.md')).toBe('committed')
-  expect(await stateOfRow(ui, 'std/b.md')).toBe('unchanged')
+  expect(await stateOfRow(ui, 'std/b.md')).toBe('noRecord')
   expect(await ui.find({ type: 'Text', text: /^미커밋/ })).toBeUndefined()
   await ui.unmount()
 })
@@ -365,5 +377,65 @@ test('지운 워크트리의 파일은 커밋됨으로 보이고 머리는 세�
   expect(await stateOfRow(ui, 'std/a.md')).toBe('committed')
   expect((await ui.find({ type: 'Text', text: '작업 트리 삭제됨' }))?.text).toBe('작업 트리 삭제됨')
   expect((await ui.find({ type: 'Text', text: 'docs (메인)' }))?.text).toBe('docs (메인)')
+  await ui.unmount()
+})
+
+/** 상태를 메모리에 두고 읽기·쓰기에 답한다. 다시 불러오기 전에 이전 버전이 남긴 값처럼 바꿔 넣으려고 쓴다 */
+function memoryState(on: On) {
+  const store = new Map<string, { value: unknown; version: number }>()
+  on('state.get', (_, e) => {
+    const got = store.get(e.key)
+    return { value: { value: got?.value, version: got?.version ?? 0 } } as never
+  })
+  on('state.set', (_, e) => {
+    const got = store.get(e.key) ?? { value: undefined, version: 0 }
+    if (e.ifVersion !== undefined && e.ifVersion !== got.version) return { value: { isSet: false, version: got.version } } as never
+    store.set(e.key, { value: e.value, version: got.version + 1 })
+    return { value: { isSet: true, version: got.version + 1 } } as never
+  })
+  return store
+}
+
+// git이 잠깐 실패해도(시간 초과·저장소 오류) 폴더가 있으면 "삭제됨 → 커밋됨"으로 바뀌면 안 된다. 커밋할 것을 놓치게 된다.
+test('폴더가 있는데 git이 실패하면 이전 커밋 여부를 그대로 둔다', async ($, on) => {
+  const world = newWorld()
+  standIn(on, world)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Edit', file_path: `${TREE}/std/a.md`, old_string: 'a', new_string: 'b' })
+
+  world.isGitBroken = true
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+
+  expect(await stateOfRow(ui, 'std/a.md')).toBe('uncommitted')
+  expect(await ui.find({ type: 'Text', text: '작업 트리 삭제됨' })).toBeUndefined()
+  await ui.unmount()
+})
+
+// 0.1.0에서 0.2.0으로 다시 불러오면 파일 목록은 남고 작업 트리 목록은 모양이 달라 버려진다.
+// 세션 시작 때 파일 목록으로 작업 트리를 다시 만들어야 하고, 그사이 지운 워크트리의 파일은 커밋됨으로 보여야 한다.
+test('이전 버전 값으로 다시 불러오면 작업 트리를 다시 만들어 커밋 여부를 보인다', async ($, on) => {
+  const world = newWorld()
+  const store = memoryState(on)
+  standIn(on, world)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Edit', file_path: `${TREE}/std/a.md`, old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Edit', file_path: `${MAIN}/std/m.md`, old_string: 'a', new_string: 'b' })
+
+  // 이전 버전(trees-1)이 남긴 작업 트리 값으로 바꾸고, 머지 뒤 워크트리를 지운 상태에서 다시 불러온다.
+  const trees = store.get('trees')
+  store.set('trees', {
+    value: { shape: 'trees-1', value: [{ root: TREE, branch: 'feature/T1-작업', isLinked: true, lastAt: 1 }] },
+    version: (trees?.version ?? 0) + 1,
+  })
+  world.dirs.delete(TREE)
+  world.dirs.delete(`${TREE}/std`)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await stateOfRow(ui, 'std/a.md')).toBe('committed')
+  expect(await stateOfRow(ui, 'std/m.md')).toBe('uncommitted')
+  expect((await ui.find({ type: 'Text', text: '작업 트리 삭제됨' }))?.text).toBe('작업 트리 삭제됨')
+  expect((await ui.find({ type: 'Text', text: 'develop' }))?.text).toBe('develop')
   await ui.unmount()
 })
