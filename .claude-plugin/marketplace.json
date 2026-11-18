@@ -16,6 +16,11 @@
       "name": "decisions",
       "source": "./mods/decisions",
       "description": "오른쪽 패널에 사용자가 정해야 할 것과 이미 정한 것을 보여 주고, 패널에서 바로 골라 Claude에게 전달한다"
+    },
+    {
+      "name": "model-switch",
+      "source": "./mods/model-switch",
+      "description": "입력창 위 줄에서 모델·effort·advisor를 눌러 바꾸고, /model-switch 명령으로 지금 값을 보거나 한 번에 바꾼다"
     }
   ]
 }

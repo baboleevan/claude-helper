@@ -1,0 +1,6 @@
+{
+  "name": "model-switch",
+  "version": "0.1.0",
+  "description": "입력창 위 줄에서 모델·effort·advisor를 눌러 바꾸고, /model-switch 명령으로 지금 값을 보거나 한 번에 바꾼다",
+  "types": "./types/index.d.ts"
+}

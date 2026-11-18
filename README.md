@@ -82,11 +82,13 @@ mod는 Claude Code 화면·동작을 바꾸는 플러그인입니다. 이 저장
 claude plugin marketplace add baboleevan/claude-helper
 claude plugin install changed-files@claude-helper
 claude plugin install decisions@claude-helper
+claude plugin install model-switch@claude-helper
 
 # 이 저장소를 고치는 PC: 클론한 폴더를 marketplace로 등록하면 폴더를 바로 읽습니다
 claude plugin marketplace add ~/github/claude-helper
 claude plugin install changed-files@claude-helper
 claude plugin install decisions@claude-helper
+claude plugin install model-switch@claude-helper
 ```
 
 - 설정 폴더가 여러 개면(Orca 프로필마다) `CLAUDE_CONFIG_DIR=<프로필 폴더> claude plugin install ...`처럼 폴더마다 설치합니다.
@@ -125,6 +127,25 @@ claude plugin install decisions@claude-helper
   - 파일을 직접 고쳐도 됩니다(`{ "items": [...] }`). 모양이 깨진 항목은 건너뜁니다.
 - 패널이 안 보이면 `/decisions`로 엽니다.
 - 한계: 이름이 같은 워크스페이스는 같은 파일을 씁니다. 두 세션이 거의 같은 순간에 쓰면 늦게 쓴 쪽이 이깁니다(쓰기 직전에 다시 읽어 줄입니다).
+
+### model-switch — 모델·effort·advisor 바꾸기
+
+- 입력창 위 줄에 **모델**(Haiku·Sonnet·Opus·Fable), **effort**(low·medium·high·xhigh·max), **advisor**(fable·opus·sonnet·off) 버튼을 두고, 지금 값을 주 버튼으로 표시합니다. 누르면 내장 명령(`/model`·`/effort`·`/advisor`)을 대신 실행합니다.
+  - 마우스로 누르거나, `ctrl+x tab`으로 줄에 초점을 옮긴 뒤 화살표와 Enter로 누릅니다.
+  - 여러 번 누르면 누른 순서대로 하나씩 실행합니다. 바꾸는 동안 줄 끝에 "…(으)로 바꾸는 중"이 보입니다.
+- `/model-switch`: 지금 값(모델·effort·advisor)과 사용법을 보여 줍니다.
+- `/model-switch model <이름> effort <수준> advisor <이름|off>`: 적은 항목만 한 번에 바꿉니다. 순서와 상관없이 모델 → effort → advisor 순으로 실행합니다.
+  - `model=opus`처럼 붙여 써도 되고, `m`·`e`·`a`로 줄여 써도 됩니다.
+  - sonnet·opus·fable은 모델과 advisor 둘 다의 이름이라 항목 이름을 꼭 씁니다(`/model-switch sonnet`은 거절).
+  - 결과는 실행된 내장 명령의 출력(예: `Set model to Sonnet 5.5 ...`)으로 대화에 남습니다.
+- 내장 명령이 하는 일은 그대로입니다. `/model`·`/effort`·`/advisor`는 고른 값을 사용자 설정(`settings.json`)에 저장해 새 세션의 기본값이 됩니다.
+- 사람이 직접 친 `/model`·`/effort`·`/advisor`(모델 선택기 포함)도 줄에 반영합니다. effort는 요청마다 실제로 보낸 값으로 다시 맞춥니다.
+- 한계
+  - advisor는 요청마다 알려 주는 곳이 없어 설정의 `advisorModel`로 표시합니다. 설정에 없으면 off로 봅니다.
+  - `/advisor`는 결과를 돌려주지 않고, 실행 직후에는 설정도 아직 이전 값입니다. 그래서 고른 값을 바로 표시하고 1초·3초 뒤 설정을 다시 읽어 바로잡습니다.
+  - advisor로 쓸 수 있는 모델은 계정·주 모델마다 다릅니다. 쓸 수 없는 값을 고르면 `/advisor`가 거절하고 그 이유를 대화에 남기며, 줄은 몇 초 뒤 원래 값으로 돌아옵니다.
+  - 모델을 바꾸면 effort는 새 모델에 저장된 값으로 표시합니다. 저장된 값이 없으면 다음 요청 전까지 비어 있습니다.
+  - 조직 라이브러리의 같은 이름 플러그인(`model-switch@claudeai-organization-library`)과 함께 켜지 않습니다. 같은 이름이라 상태가 겹칩니다.
 
 ## 테스트
 
