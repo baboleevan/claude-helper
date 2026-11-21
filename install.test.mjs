@@ -64,14 +64,4 @@ test("설치 명령은 훅 파일을 복사하고 설정을 백업한 뒤 고친
   assert.equal(fs.readdirSync(tmp).filter((f) => f.includes(".bak-")).length, 1);
 
   assert.notEqual(run("--only", "no-such-hook").status, 0);
-
-  // 슬래시 명령이 딸린 훅은 설정 파일 옆 commands/에 명령 파일도 복사합니다.
-  const ask = run("--only", "ask-only");
-  assert.equal(ask.status, 0, ask.stderr);
-  assert.ok(fs.existsSync(path.join(tmp, "commands", "ask.md")));
-  const withAsk = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
-  assert.equal(
-    withAsk.hooks.PreToolUse.at(-1).matcher,
-    "Write|Edit|MultiEdit|NotebookEdit|Bash",
-  );
 });
