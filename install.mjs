@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * claude-helper 설치 스크립트: 훅 파일을 복사하고 Claude Code 설정(settings.json)에 등록합니다.
- * 훅에 딸린 슬래시 명령(예: /ask)은 각 설정 파일 옆의 `commands/` 폴더에 복사합니다.
+ * 훅에 딸린 슬래시 명령은 각 설정 파일 옆의 `commands/` 폴더에 복사합니다.
  *
  * 사용법
  *   node install.mjs                         # 모든 훅 설치(기본 설정 파일)
