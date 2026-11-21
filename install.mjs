@@ -38,16 +38,6 @@ export const HOOKS = {
       },
     ],
   },
-  "ask-only": {
-    description: "질문엔 답변만: /ask 또는 의문형 프롬프트면 파일 수정·상태 변경 도구를 막고 답변만 하게 함",
-    files: ["ask-only.mjs"],
-    entry: "ask-only.mjs",
-    commands: ["ask.md"],
-    events: [
-      { event: "UserPromptSubmit", timeout: 10 },
-      { event: "PreToolUse", matcher: "Write|Edit|MultiEdit|NotebookEdit|Bash", timeout: 10 },
-    ],
-  },
   "korean-reply-guard": {
     description: "한국어 답변 강제: 질문마다 한국어 알림, 영어로 끝나면 한국어로 다시 쓰게 함",
     files: ["korean-reply-guard.mjs"],
